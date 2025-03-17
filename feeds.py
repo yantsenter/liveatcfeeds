@@ -87,7 +87,9 @@ def extract_feed_data(html):
                     status = status_font.text.strip()
             
             # Extract channel types from the title in the strong tag
+            # use the frequencies for this
             channel_types = []
+            # print(row)
             strong_tag = row.find('strong')
             if strong_tag:
                 title_text = strong_tag.text
@@ -107,11 +109,49 @@ def extract_feed_data(html):
             # Extract METAR if available - it's after a <br /> tag within the purSep span
             metar_text = ""
             if status_span:
-                # Find all text after the status
-                metar_pattern = re.compile(r'[A-Z]{4}\s\d{6}Z.+?(?=<br />|$)')
-                metar_match = metar_pattern.search(str(status_span))
+                # Convert the status_span to string to search for METAR
+                status_span_str = str(status_span)
+                
+                # Find METAR pattern - typically starts with 4-letter ICAO code followed by date/time and weather info
+                # Example: FIMP 170800Z 04011KT 9999 FEW015CB SCT017 31/25 Q1011
+                metar_pattern = re.compile(r'<br />((?:[A-Z]{4}\s\d{6}Z.+?)(?=<br />|$))')
+                metar_match = metar_pattern.search(status_span_str)
+                
                 if metar_match:
-                    metar_text = metar_match.group(0)
+                    metar_text = metar_match.group(1).strip()
+                else:
+                    # Alternative pattern for some feeds
+                    alt_pattern = re.compile(r'UTC</font><br><br />((?:[A-Z]{4}\s\d{6}Z.+?)(?=<br />|$))')
+                    alt_match = alt_pattern.search(status_span_str)
+                    if alt_match:
+                        metar_text = alt_match.group(1).strip()
+                
+                # If still no match, try a more general approach
+                if not metar_text:
+                    # Look for any text that looks like a METAR (ICAO code followed by date/time)
+                    general_pattern = re.compile(r'([A-Z]{4}\s\d{6}Z\s+[\w\d\s/]+\s+Q\d{4}(?:\s+\w+)?)')
+                    general_match = general_pattern.search(status_span_str)
+                    if general_match:
+                        metar_text = general_match.group(1).strip()
+                
+                # If still no match, try an even more general pattern
+                if not metar_text:
+                    # Look for any text that starts with an ICAO code and date/time
+                    basic_pattern = re.compile(r'([A-Z]{4}\s\d{6}Z\s+[^<]+)')
+                    basic_match = basic_pattern.search(status_span_str)
+                    if basic_match:
+                        metar_text = basic_match.group(1).strip()
+                
+                # Clean up the METAR text - remove any HTML tags that might have been captured
+                if metar_text:
+                    # Remove any HTML tags
+                    metar_text = re.sub(r'<[^>]+>', '', metar_text)
+                    # Remove any extra whitespace
+                    metar_text = re.sub(r'\s+', ' ', metar_text).strip()
+                    
+                    # Validate the METAR format - it should start with an ICAO code (4 uppercase letters)
+                    if not re.match(r'^[A-Z]{4}\s\d{6}Z', metar_text):
+                        metar_text = ""  # Invalid METAR format, reset to empty
             
             # Extract listener count - it's in a font tag with class="purSep" after the status span
             listeners = 0
@@ -127,18 +167,73 @@ def extract_feed_data(html):
                         break
             
             # Extract frequencies - they're in the next cell (td) with valign="top"
-            frequencies = {}
-            next_cell = row.find_next_sibling('td', {'valign': 'top'})
-            if next_cell:
-                freq_font = next_cell.find('font', {'class': 'purSep'})
-                if freq_font:
-                    freq_text = freq_font.text.strip()
-                    for line in freq_text.split('\n'):
-                        if ':' in line:
-                            parts = line.split(':', 1)
-                            if len(parts) == 2:
-                                name, freq = parts
-                                frequencies[name.strip()] = freq.strip()
+            frequencies = ""
+            # Get all td elements in the current row
+            tds = row.find_all('td')
+            if len(tds) > 1:
+                # Try to find the td with frequencies - it will be the last td with valign="top"
+                freq_td = None
+                for td in tds:
+                    if td.get('valign') == 'top' and td.select_one('p font.purSep'):
+                        freq_td = td
+                        break
+                
+                if freq_td:
+                    freq_font = freq_td.select_one('p font.purSep')
+                    if freq_font:
+                        # Split the text by newlines and remove empty lines
+                        freq_text = freq_font.text.strip()
+                        freq_lines = [line.strip() for line in freq_text.split('\n') if line.strip()]
+                        
+                        # Process each frequency line
+
+                        frequencies = freq_lines[0]
+            
+            # print("\nExtracted frequencies:", frequencies)
+            
+            # Extract additional channel types from frequencies string
+            if frequencies:
+                # Define mappings for channel type detection
+                channel_type_mappings = {
+                    'Tower': ['Tower', 'Twr', 'TWR'],
+                    'Approach': ['Approach', 'App', 'APP', 'Arrival', 'ARR'],
+                    'Departure': ['Departure', 'Dep', 'DEP'],
+                    'Ground': ['Ground', 'Gnd', 'GND'],
+                    'Center': ['Center', 'Centre', 'Ctr', 'CTR', 'Control', 'CTRL'],
+                    'ATIS': ['ATIS', 'Information', 'Info', 'INFO'],
+                    'Clearance': ['Clearance', 'Clnc', 'CLNC', 'Delivery', 'Del', 'DEL'],
+                    'Ramp': ['Ramp', 'Apron', 'APN'],
+                    'Operations': ['Operations', 'Ops', 'OPS'],
+                    'Radio': ['Radio', 'Unicom', 'UNICOM'],
+                    'Director': ['Director', 'Dir', 'DIR'],
+                    'Radar': ['Radar', 'RAD'],
+                    'Terminal': ['Terminal', 'TMA'],
+                    'Area': ['Area', 'ACC'],
+                    'Flight Service': ['Flight Service', 'FSS'],
+                    'Surface': ['Surface', 'SMC'],
+                    'Pre-Departure': ['Pre-Departure', 'PDC'],
+                    'Final': ['Final', 'FIN'],
+                    'Emergency': ['Emergency', 'EMERG']
+                }
+                
+                # Convert frequencies to lowercase for case-insensitive matching
+                frequencies_lower = frequencies.lower()
+                
+                # Check for each channel type in the frequencies string
+                for channel_type, keywords in channel_type_mappings.items():
+                    for keyword in keywords:
+                        # Check for exact word match (surrounded by spaces, colon, or at beginning/end)
+                        keyword_lower = keyword.lower()
+                        if (f" {keyword_lower} " in f" {frequencies_lower} " or 
+                            f" {keyword_lower}: " in frequencies_lower or 
+                            f":{keyword_lower} " in frequencies_lower or
+                            frequencies_lower.startswith(f"{keyword_lower} ") or
+                            frequencies_lower.endswith(f" {keyword_lower}") or
+                            f" {keyword_lower}/" in frequencies_lower or
+                            f"/{keyword_lower} " in frequencies_lower):
+                            if channel_type not in channel_types:
+                                channel_types.append(channel_type)
+                                break
             
             # Current timestamp in UTC
             timestamp = datetime.now(timezone.utc).isoformat()
@@ -147,11 +242,22 @@ def extract_feed_data(html):
             feed_name = "Unknown Feed"
             if strong_tag and strong_tag.find('a'):
                 feed_name = strong_tag.find('a').text.strip()
-            elif strong_tag:
+            elif strong_tag and strong_tag.text.strip() != "DOWN":
                 feed_name = strong_tag.text.strip()
             else:
-                # Fallback to using location and ICAO if no feed name found
-                feed_name = f"{location} ({icao})"
+                # For DOWN feeds or when strong tag is not available
+                # The feed name is in the first font tag with class="nav"
+                nav_fonts = row.find_all('font', {'class': 'nav'})
+                if nav_fonts and len(nav_fonts) > 0:
+                    # Get the text content of the first nav font
+                    nav_text = nav_fonts[0].get_text(separator=' ', strip=True)
+                    
+                    # For DOWN feeds, we need to construct the feed name from the ICAO code and the channel types
+                    # The nav text typically contains the ICAO code followed by the channel types (e.g., "FLKK Twr/App")
+                    feed_name = nav_text
+                else:
+                    # Fallback to using location and ICAO if no feed name found
+                    feed_name = f"{location} ({icao})"
             
             # Create AirportFeed object
             feed = AirportFeed(
@@ -193,7 +299,7 @@ def save_to_json(feeds, filename="liveatc_feeds.json"):
             # First time seeing this ICAO
             existing_data[feed_name] = {
                 "static_data": {
-                    "icao": feed_dict['icao'],
+                    "icao": feed_dict['icao'].upper(),
                     "location": feed_dict['location'],
                     "frequencies": feed_dict['frequencies'],
                     "channel_types": feed_dict['channel_types']
@@ -215,23 +321,33 @@ def save_to_json(feeds, filename="liveatc_feeds.json"):
         json.dump(existing_data, f, indent=2)
 
 async def main():
-    url = "https://www.liveatc.net/feedindex.php?type=international-af"
+    # url = "https://www.liveatc.net/feedindex.php?type=international-af"
     # url = "https://www.liveatc.net/feedindex.php?type=hf"
     # url = "https://www.liveatc.net/feedindex.php?type=international-na"
-
-    # Create a ClientSession with SSL verification disabled
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-        html = await fetch(session, url)
-        # Wait 1 second after the page loads
-        # await asyncio.sleep(1)
-        
-        # Extract feed data
-        feeds = extract_feed_data(html)
-        
-        # Save to JSON
-        save_to_json(feeds)
-        
-        print(f"Successfully processed {len(feeds)} feeds")
+    # urls = ["https://www.liveatc.net/feedindex.php?type=international-af", "https://www.liveatc.net/feedindex.php?type=international-af",
+    #          "https://www.liveatc.net/feedindex.php?type=international-na"]
+    urls = ["https://www.liveatc.net/feedindex.php?type=class-b", "https://www.liveatc.net/feedindex.php?type=class-c", 
+            "https://www.liveatc.net/feedindex.php?type=class-d", "https://www.liveatc.net/feedindex.php?type=us-artcc",
+            "https://www.liveatc.net/feedindex.php?type=canada", "https://www.liveatc.net/feedindex.php?type=international-eu", 
+            "https://www.liveatc.net/feedindex.php?type=international-oc", "https://www.liveatc.net/feedindex.php?type=international-as",
+            "https://www.liveatc.net/feedindex.php?type=international-sa", "https://www.liveatc.net/feedindex.php?type=international-na",
+            "https://www.liveatc.net/feedindex.php?type=international-af", "https://www.liveatc.net/feedindex.php?type=hf"]
+    
+    for url in urls:
+        # Create a ClientSession with SSL verification disabled
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+            print(f"Now fetching {url} Please wait...")
+            html = await fetch(session, url)
+            # Wait 1 second after the page loads
+            # await asyncio.sleep(1)
+            
+            # Extract feed data
+            feeds = extract_feed_data(html)
+            
+            # Save to JSON
+            save_to_json(feeds)
+            
+            print(f"Successfully processed {len(feeds)} feeds for {url}")
 
 if __name__ == '__main__':
     asyncio.run(main())
