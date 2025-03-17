@@ -152,12 +152,25 @@ def extract_feed_data(html):
                     # Validate the METAR format - it should start with an ICAO code (4 uppercase letters)
                     if not re.match(r'^[A-Z]{4}\s\d{6}Z', metar_text):
                         metar_text = ""  # Invalid METAR format, reset to empty
+                    
+                    # Make sure we don't have "Airport Info" or "Flight Activity" in the METAR
+                    if 'Airport Info' in metar_text or 'Flight Activity' in metar_text:
+                        # Try to extract just the METAR part before these strings
+                        clean_metar = re.match(r'^([A-Z]{4}\s\d{6}Z[^A]*)(?:Airport Info|Flight Activity)', metar_text)
+                        if clean_metar:
+                            metar_text = clean_metar.group(1).strip()
+                        else:
+                            metar_text = ""  # Can't extract a clean METAR
             
             # Extract listener count - it's in a font tag with class="purSep" after the status span
             listeners = 0
             total_listeners = 0
             listener_fonts = row.find_all('font', {'class': 'purSep'})
             for font in listener_fonts:
+                # Skip "Airport Info" and "Flight Activity" lines
+                if 'Airport Info' in font.text or 'Flight Activity' in font.text:
+                    continue
+                
                 if 'Listeners:' in font.text:
                     listeners_pattern = re.compile(r'Listeners:\s*(\d+)\s*out of\s*(\d+)')
                     listeners_match = listeners_pattern.search(font.text)
@@ -171,23 +184,34 @@ def extract_feed_data(html):
             # Get all td elements in the current row
             tds = row.find_all('td')
             if len(tds) > 1:
-                # Try to find the td with frequencies - it will be the last td with valign="top"
-                freq_td = None
+                # The frequencies are in the last td with valign="top"
                 for td in tds:
-                    if td.get('valign') == 'top' and td.select_one('p font.purSep'):
-                        freq_td = td
-                        break
-                
-                if freq_td:
-                    freq_font = freq_td.select_one('p font.purSep')
-                    if freq_font:
-                        # Split the text by newlines and remove empty lines
-                        freq_text = freq_font.text.strip()
-                        freq_lines = [line.strip() for line in freq_text.split('\n') if line.strip()]
-                        
-                        # Process each frequency line
-
-                        frequencies = freq_lines[0]
+                    if td.get('valign') == 'top':
+                        # Look for font tags with class="purSep" inside this td
+                        freq_fonts = td.find_all('font', {'class': 'purSep'})
+                        if freq_fonts:
+                            # Get all the text from the font tag and split by <br> tags
+                            freq_text = freq_fonts[0].get_text(strip=True)
+                            # Skip if it contains "Airport Info" or "Flight Activity"
+                            if 'Airport Info' not in freq_text and 'Flight Activity' not in freq_text:
+                                # Replace <br> tags with spaces to join multiple frequency lines
+                                frequencies = freq_text
+                                break
+            
+            # If frequencies is still empty, try another approach
+            if not frequencies:
+                # Try to find the frequencies in the next row's td
+                next_row = row.find_next('tr')
+                if next_row:
+                    next_tds = next_row.find_all('td')
+                    for td in next_tds:
+                        if td.get('valign') == 'top':
+                            freq_fonts = td.find_all('font', {'class': 'purSep'})
+                            if freq_fonts:
+                                freq_text = freq_fonts[0].get_text(strip=True)
+                                if 'Airport Info' not in freq_text and 'Flight Activity' not in freq_text:
+                                    frequencies = freq_text
+                                    break
             
             # print("\nExtracted frequencies:", frequencies)
             
@@ -321,11 +345,10 @@ def save_to_json(feeds, filename="liveatc_feeds.json"):
         json.dump(existing_data, f, indent=2)
 
 async def main():
-    # url = "https://www.liveatc.net/feedindex.php?type=international-af"
+    # urls = ["https://www.liveatc.net/feedindex.php?type=international-af"]
     # url = "https://www.liveatc.net/feedindex.php?type=hf"
     # url = "https://www.liveatc.net/feedindex.php?type=international-na"
-    # urls = ["https://www.liveatc.net/feedindex.php?type=international-af", "https://www.liveatc.net/feedindex.php?type=international-af",
-    #          "https://www.liveatc.net/feedindex.php?type=international-na"]
+    # urls = ["https://www.liveatc.net/feedindex.php?type=class-b"]
     urls = ["https://www.liveatc.net/feedindex.php?type=class-b", "https://www.liveatc.net/feedindex.php?type=class-c", 
             "https://www.liveatc.net/feedindex.php?type=class-d", "https://www.liveatc.net/feedindex.php?type=us-artcc",
             "https://www.liveatc.net/feedindex.php?type=canada", "https://www.liveatc.net/feedindex.php?type=international-eu", 
