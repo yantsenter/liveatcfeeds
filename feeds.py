@@ -305,23 +305,22 @@ def extract_feed_data(html):
     
     return feeds
 
-# New function to save to S3 instead of local file
-def save_to_s3(feeds, bucket_name, filename="liveatc_feeds.json"):
-    s3 = boto3.resource('s3')
-    
-    # Check if file exists in S3 and download it
-    existing_data = {}
-    try:
-        s3_object = s3.Object(bucket_name, filename)
-        file_content = s3_object.get()['Body'].read().decode('utf-8')
-        existing_data = json.loads(file_content)
-    except Exception as e:
-        print(f"No existing file found or error reading: {e}")
+# New function to update feed data that can be used by both S3 and local storage methods
+def update_feed_data(existing_data, feeds):
+    # Track feed names we've already seen in this scrape
+    processed_feed_names = set()
     
     # Update with new data
     for feed in feeds:
         feed_dict = feed.to_dict()
         feed_name = feed_dict['feed_name']
+        
+        # Skip if we've already processed a feed with this name in the current scrape
+        if feed_name in processed_feed_names:
+            continue
+            
+        # Mark this feed as processed
+        processed_feed_names.add(feed_name)
         
         if feed_name not in existing_data:
             # First time seeing this feed
@@ -344,22 +343,42 @@ def save_to_s3(feeds, bucket_name, filename="liveatc_feeds.json"):
             "metar": feed_dict['metar']
         })
     
+    return existing_data
+
+# Modified function to save to S3 using the update_feed_data helper
+def save_to_s3(feeds, bucket_name, filename="liveatc_feeds.json"):
+    s3 = boto3.resource('s3')
+    
+    # Check if file exists in S3 and download it
+    existing_data = {}
+    try:
+        s3_object = s3.Object(bucket_name, filename)
+        file_content = s3_object.get()['Body'].read().decode('utf-8')
+        existing_data = json.loads(file_content)
+    except Exception as e:
+        print(f"No existing file found or error reading: {e}")
+    
+    # Update data using the common function
+    updated_data = update_feed_data(existing_data, feeds)
+    
     # Upload updated data to S3
     s3_object = s3.Object(bucket_name, filename)
     s3_object.put(
-        Body=json.dumps(existing_data, indent=2),
+        Body=json.dumps(updated_data, indent=2),
         ContentType='application/json'
     )
     print(f"Successfully updated {filename} in S3 bucket {bucket_name}")
 
 # Lambda handler function
 async def process_urls():
-    urls = ["https://www.liveatc.net/feedindex.php?type=class-b", "https://www.liveatc.net/feedindex.php?type=class-c", 
+    urls = ["https://www.liveatc.net/feedindex.php?type=class-b", 
+            "https://www.liveatc.net/feedindex.php?type=class-c", 
             "https://www.liveatc.net/feedindex.php?type=class-d", "https://www.liveatc.net/feedindex.php?type=us-artcc",
             "https://www.liveatc.net/feedindex.php?type=canada", "https://www.liveatc.net/feedindex.php?type=international-eu", 
             "https://www.liveatc.net/feedindex.php?type=international-oc", "https://www.liveatc.net/feedindex.php?type=international-as",
             "https://www.liveatc.net/feedindex.php?type=international-sa", "https://www.liveatc.net/feedindex.php?type=international-na",
-            "https://www.liveatc.net/feedindex.php?type=international-af", "https://www.liveatc.net/feedindex.php?type=hf"]
+            "https://www.liveatc.net/feedindex.php?type=international-af", "https://www.liveatc.net/feedindex.php?type=hf"
+            ]
     
     all_feeds = []
     
@@ -395,6 +414,34 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'body': json.dumps(f'Successfully processed {len(feeds)} total feeds')
     }
+
+
+async def main():
+    # Run the async process
+    feeds = await process_urls()
+    
+    # Save locally instead of to S3
+    local_filename = "liveatc_feeds.json"
+    
+    # Load existing data if file exists
+    existing_data = {}
+    if os.path.exists(local_filename):
+        try:
+            with open(local_filename, 'r') as f:
+                existing_data = json.loads(f.read())
+        except Exception as e:
+            print(f"Error reading existing file: {e}")
+    
+    # Update data using the common function
+    updated_data = update_feed_data(existing_data, feeds)
+    
+    # Save to local file
+    with open(local_filename, 'w') as f:
+        json.dump(updated_data, f, indent=2)
+    
+    print(f"Successfully processed {len(feeds)} total feeds")
+    print(f"Data saved to {local_filename}")
+
 
 if __name__ == '__main__':
     # Local testing
