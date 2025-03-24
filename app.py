@@ -9,13 +9,6 @@ from datetime import datetime, timezone
 import plotly.graph_objects as go
 import os
 
-try:
-    import mplcursors
-except ImportError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "mplcursors"])
-    import mplcursors
-
 def load_data(file_path: str) -> Dict[str, Any]:
     """Load JSON data from the specified file path."""
     with open(file_path, 'r') as file:
