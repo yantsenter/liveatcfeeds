@@ -186,7 +186,7 @@ def main():
     
     # Get last modified date for local file if it exists
     local_file_path = "liveatc_feeds.json"
-    local_file_label = "Use local file (liveatc_feeds.json)"
+    local_file_label = "Use existing file (liveatc_feeds.json)"
     
     try:
         # Get file modification time
@@ -201,7 +201,7 @@ def main():
     # Option to choose data source with updated label
     data_source = st.radio(
         "Choose data source:",
-        [local_file_label, "Upload a JSON file"]
+        [local_file_label, "Upload a new JSON file"]
     )
     
     data = None
