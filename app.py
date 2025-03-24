@@ -193,7 +193,7 @@ def main():
         mod_time = os.path.getmtime(local_file_path)
         # Convert to datetime and format for display
         mod_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d')
-        local_file_label = f"Use local file (liveatc_feeds.json, data ending on: {mod_date})"
+        local_file_label = f"Use existing file (liveatc_feeds.json, data ending on: {mod_date})"
     except (FileNotFoundError, OSError):
         # If file doesn't exist or other OS error, just use the default label
         pass
