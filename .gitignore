@@ -1,2 +1,5 @@
 .DS_Store
 venv/
+lambda_package/
+lambda_deployment/
+lambda_deployment.zip

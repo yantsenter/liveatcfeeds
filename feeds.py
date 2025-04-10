@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import time
 import boto3
 
@@ -345,18 +345,68 @@ def update_feed_data(existing_data, feeds):
     
     return existing_data
 
-# Modified function to save to S3 using the update_feed_data helper
-def save_to_s3(feeds, bucket_name, filename="liveatc_feeds.json"):
+# Create and update an index file to track all partitions
+def update_index_file(bucket_name, new_filename, base_index_name="liveatc_feeds_index.json"):
     s3 = boto3.resource('s3')
     
-    # Check if file exists in S3 and download it
+    # Try to load existing index
+    index_data = {"partitions": []}
+    try:
+        index_object = s3.Object(bucket_name, base_index_name)
+        file_content = index_object.get()['Body'].read().decode('utf-8')
+        index_data = json.loads(file_content)
+    except Exception as e:
+        print(f"No existing index found or error reading: {e}")
+    
+    # Extract date from filename (assuming format liveatc_feeds_YYYY-MM-DD.json)
+    date_str = new_filename.split('_')[-1].split('.')[0]
+    
+    # Check if this partition already exists in index
+    for partition in index_data["partitions"]:
+        if partition["filename"] == new_filename:
+            # Update the last_modified timestamp
+            partition["last_modified"] = datetime.now(timezone.utc).isoformat()
+            break
+    else:
+        # Add new partition entry
+        index_data["partitions"].append({
+            "filename": new_filename,
+            "date": date_str,
+            "created": datetime.now(timezone.utc).isoformat(),
+            "last_modified": datetime.now(timezone.utc).isoformat()
+        })
+    
+    # Sort partitions by date (newest first)
+    index_data["partitions"] = sorted(
+        index_data["partitions"], 
+        key=lambda x: x["date"], 
+        reverse=True
+    )
+    
+    # Update the index file
+    index_object = s3.Object(bucket_name, base_index_name)
+    index_object.put(
+        Body=json.dumps(index_data, indent=2),
+        ContentType='application/json'
+    )
+    print(f"Updated index file with partition {new_filename}")
+
+# Modified save_to_s3 function with index update
+def save_to_s3(feeds, bucket_name, base_filename="liveatc_feeds"):
+    s3 = boto3.resource('s3')
+    
+    # Create partition key based on current date (YYYY-MM-DD format)
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filename = f"{base_filename}_{current_date}.json"
+    
+    # Check if today's file exists in S3 and download it
     existing_data = {}
     try:
         s3_object = s3.Object(bucket_name, filename)
         file_content = s3_object.get()['Body'].read().decode('utf-8')
         existing_data = json.loads(file_content)
     except Exception as e:
-        print(f"No existing file found or error reading: {e}")
+        print(f"No existing file found for today or error reading: {e}")
     
     # Update data using the common function
     updated_data = update_feed_data(existing_data, feeds)
@@ -368,8 +418,152 @@ def save_to_s3(feeds, bucket_name, filename="liveatc_feeds.json"):
         ContentType='application/json'
     )
     print(f"Successfully updated {filename} in S3 bucket {bucket_name}")
+    
+    # Update the index file
+    update_index_file(bucket_name, filename)
+
+# New function to aggregate data across multiple partitions
+def aggregate_feed_data(bucket_name, start_date=None, end_date=None, feed_names=None, 
+                        base_index_name="liveatc_feeds_index.json", base_filename="liveatc_feeds"):
+    """
+    Aggregates feed data across multiple partition files based on date range and optional feed names.
+    
+    Args:
+        bucket_name (str): S3 bucket name
+        start_date (str, optional): Start date in YYYY-MM-DD format. If None, all available data from earliest date.
+        end_date (str, optional): End date in YYYY-MM-DD format. If None, defaults to current date.
+        feed_names (list, optional): List of feed names to include. If None, all feeds are included.
+        base_index_name (str): Name of the index file
+        base_filename (str): Base name for data files
+        
+    Returns:
+        dict: Aggregated feed data
+    """
+    s3 = boto3.resource('s3')
+    
+    # Set default end_date to today if not provided
+    if not end_date:
+        end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    
+    # Convert date strings to datetime objects for comparison
+    end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+    if start_date:
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        # Default to a very old date if not specified
+        start_date_obj = datetime.strptime("2000-01-01", "%Y-%m-%d")
+    
+    # Load the index file to get list of partitions
+    try:
+        index_object = s3.Object(bucket_name, base_index_name)
+        file_content = index_object.get()['Body'].read().decode('utf-8')
+        index_data = json.loads(file_content)
+    except Exception as e:
+        print(f"Error loading index file: {e}")
+        return {}
+    
+    # Filter partitions by date range
+    relevant_partitions = []
+    for partition in index_data.get("partitions", []):
+        partition_date = datetime.strptime(partition["date"], "%Y-%m-%d")
+        if start_date_obj <= partition_date <= end_date_obj:
+            relevant_partitions.append(partition["filename"])
+    
+    # Initialize aggregate data
+    aggregated_data = {}
+    
+    # Process each relevant partition
+    for filename in relevant_partitions:
+        try:
+            # Load partition data
+            s3_object = s3.Object(bucket_name, filename)
+            file_content = s3_object.get()['Body'].read().decode('utf-8')
+            partition_data = json.loads(file_content)
+            
+            # Merge into aggregated data
+            for feed_name, feed_data in partition_data.items():
+                # Skip feeds not in feed_names if feed_names is specified
+                if feed_names and feed_name not in feed_names:
+                    continue
+                    
+                if feed_name not in aggregated_data:
+                    # First occurrence of this feed, copy all data
+                    aggregated_data[feed_name] = {
+                        "static_data": feed_data["static_data"].copy(),
+                        "time_series": feed_data["time_series"].copy()
+                    }
+                else:
+                    # Feed already exists in aggregated data, append time series
+                    aggregated_data[feed_name]["time_series"].extend(feed_data["time_series"])
+        except Exception as e:
+            print(f"Error processing partition {filename}: {e}")
+    
+    # For each feed, sort time_series by timestamp to ensure chronological order
+    for feed_name in aggregated_data:
+        aggregated_data[feed_name]["time_series"] = sorted(
+            aggregated_data[feed_name]["time_series"],
+            key=lambda x: x["timestamp"]
+        )
+    
+    return aggregated_data
 
 # Lambda handler function
+def lambda_handler(event, context):
+    bucket_name = os.environ.get('S3_BUCKET_NAME')
+    if not bucket_name:
+        return {
+            'statusCode': 500,
+            'body': json.dumps('S3_BUCKET_NAME environment variable not set')
+        }
+    
+    # Check if this is a data aggregation request
+    if event.get('aggregate'):
+        # Extract aggregation parameters
+        start_date = event.get('start_date')
+        end_date = event.get('end_date')
+        feed_names = event.get('feed_names')
+        
+        # Perform aggregation
+        aggregated_data = aggregate_feed_data(
+            bucket_name, 
+            start_date=start_date,
+            end_date=end_date,
+            feed_names=feed_names
+        )
+        
+        # For large datasets, rather than returning directly, save to a temporary file
+        if event.get('save_result'):
+            result_filename = f"aggregated_result_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+            s3_object = boto3.resource('s3').Object(bucket_name, result_filename)
+            s3_object.put(
+                Body=json.dumps(aggregated_data, indent=2),
+                ContentType='application/json'
+            )
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'message': 'Aggregation complete',
+                    'result_file': result_filename
+                })
+            }
+        
+        # For smaller datasets or direct API calls
+        return {
+            'statusCode': 200,
+            'body': json.dumps(aggregated_data)
+        }
+    
+    # Standard data collection flow
+    feeds = asyncio.run(process_urls())
+    
+    # Save to S3 with daily partitioning
+    save_to_s3(feeds, bucket_name)
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f'Successfully processed {len(feeds)} total feeds')
+    }
+
 async def process_urls():
     urls = ["https://www.liveatc.net/feedindex.php?type=class-b", 
             "https://www.liveatc.net/feedindex.php?type=class-c", 
@@ -396,53 +590,6 @@ async def process_urls():
     
     return all_feeds
 
-def lambda_handler(event, context):
-    bucket_name = os.environ.get('S3_BUCKET_NAME')
-    if not bucket_name:
-        return {
-            'statusCode': 500,
-            'body': json.dumps('S3_BUCKET_NAME environment variable not set')
-        }
-    
-    # Run the async process
-    feeds = asyncio.run(process_urls())
-    
-    # Save to S3
-    save_to_s3(feeds, bucket_name)
-    
-    return {
-        'statusCode': 200,
-        'body': json.dumps(f'Successfully processed {len(feeds)} total feeds')
-    }
-
-
-async def main():
-    # Run the async process
-    feeds = await process_urls()
-    
-    # Save locally instead of to S3
-    local_filename = "liveatc_feeds.json"
-    
-    # Load existing data if file exists
-    existing_data = {}
-    if os.path.exists(local_filename):
-        try:
-            with open(local_filename, 'r') as f:
-                existing_data = json.loads(f.read())
-        except Exception as e:
-            print(f"Error reading existing file: {e}")
-    
-    # Update data using the common function
-    updated_data = update_feed_data(existing_data, feeds)
-    
-    # Save to local file
-    with open(local_filename, 'w') as f:
-        json.dump(updated_data, f, indent=2)
-    
-    print(f"Successfully processed {len(feeds)} total feeds")
-    print(f"Data saved to {local_filename}")
-
-
 if __name__ == '__main__':
     # Local testing
-    asyncio.run(main())
+    asyncio.run(lambda_handler({}, {}))

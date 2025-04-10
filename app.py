@@ -214,12 +214,12 @@ def main():
             st.success(f"Loaded local data for {len(data)} feeds.")
         except FileNotFoundError:
             st.error(f"Local file not found at {local_file_path}. Please upload a file instead.")
-            data_source = "Upload a JSON file"  # Switch to upload option
+            data_source = "Upload a new JSON file"  # Switch to upload option
         except json.JSONDecodeError:
             st.error(f"Invalid JSON format in the local file. Please upload a valid file instead.")
-            data_source = "Upload a JSON file"  # Switch to upload option
+            data_source = "Upload a new JSON file"  # Switch to upload option
     
-    if data_source == "Upload a JSON file":
+    if data_source == "Upload a new JSON file":
         # File uploader
         uploaded_file = st.file_uploader("Upload LiveATC feeds JSON file", type="json")
         
